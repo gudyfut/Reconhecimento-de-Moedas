@@ -1,18 +1,38 @@
 import cv2
 import numpy as np
 import os
-from sklearn.neighbors import KNeighborsClassifier
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
 
-# --- 1. Função para extrair características (APENAS COR) ---
+# --- 1. Função para extrair características (INCLUI GEOMÉTRICOS E COR ANEL-NUCLEO) ---
 def extrair_caracteristicas(contorno, imagem_bgr):
-    # --- Atributo de Cor Média (RGB) ---
+    # Atributos geométricos
+    area = cv2.contourArea(contorno)
+    perimetro = cv2.arcLength(contorno, True)
+    circularidade = 4 * np.pi * area / (perimetro ** 2) if perimetro != 0 else 0
+    # Máscara total da moeda
     mascara = np.zeros(imagem_bgr.shape[:2], dtype=np.uint8)
     cv2.drawContours(mascara, [contorno], -1, 255, -1)
-    media_cor = cv2.mean(imagem_bgr, mask=mascara)[:3]
-
-    return [*media_cor]
+    media_cor_total = cv2.mean(imagem_bgr, mask=mascara)[:3]
+    # Cálculo do centro e raio aproximado
+    (x, y), raio = cv2.minEnclosingCircle(contorno)
+    centro = (int(x), int(y))
+    raio = int(raio)
+    # Máscara do núcleo (círculo menor, ~60% do raio)
+    raio_nucleo = int(raio * 0.6)
+    mascara_nucleo = np.zeros_like(mascara)
+    cv2.circle(mascara_nucleo, centro, raio_nucleo, 255, -1)
+    # Máscara do anel = moeda - núcleo
+    mascara_anel = cv2.subtract(mascara, mascara_nucleo)
+    # Cor média do núcleo e do anel
+    cor_nucleo = cv2.mean(imagem_bgr, mask=mascara_nucleo)[:3]
+    cor_anel = cv2.mean(imagem_bgr, mask=mascara_anel)[:3]
+    # Diferença absoluta média entre anel e núcleo (em cada canal)
+    diff_anel_nucleo = tuple(abs(a - n) for a, n in zip(cor_anel, cor_nucleo))
+    diff_anel_nucleo_media = np.mean(diff_anel_nucleo)
+    # O vetor de características inclui geométricos, cor total, cor núcleo, cor anel e diferença média
+    return [area, perimetro, circularidade, *media_cor_total, *cor_nucleo, *cor_anel, diff_anel_nucleo_media]
 
 # --- 2. Pré-processamento e Segmentação (sem alterações) ---
 def segmentar_moedas(imagem):
@@ -23,38 +43,32 @@ def segmentar_moedas(imagem):
     contornos, _ = cv2.findContours(bordas, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     return contornos
 
-# --- 3. Função para treinar o modelo (MODIFICADA) ---
+# --- 3. Função para treinar o modelo (APENAS RANDOM FOREST) ---
 def treinar_modelo():
     dataset_path = "all"
     X, y = [], []
     print(f"Carregando imagens de treino do diretório: {dataset_path}")
     for filename in os.listdir(dataset_path):
-        if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+        if filename.lower().endswith((".png", ".jpg", ".jpeg")):
             try:
                 valor_moeda = int(filename.split('_')[0])
                 img_path = os.path.join(dataset_path, filename)
                 imagem_treino = cv2.imread(img_path)
-                # imagem_cinza não é mais necessária aqui
                 contornos_treino = segmentar_moedas(imagem_treino)
                 if contornos_treino:
                     cnt = max(contornos_treino, key=cv2.contourArea)
-                    # A chamada para extrair características foi simplificada
                     carac = extrair_caracteristicas(cnt, imagem_treino)
                     X.append(carac)
                     y.append(valor_moeda)
             except Exception as e:
                 print(f"Não foi possível processar {filename}: {e}")
-    
     if not X: return None
-    
     print(f"{len(X)} imagens processadas com sucesso para treinamento.")
-
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(np.array(X))
-
-    clf = KNeighborsClassifier(n_neighbors=3)
+    clf = RandomForestClassifier(n_estimators=100, random_state=42)
     clf.fit(X_scaled, np.array(y))
-    print("Modelo treinado com sucesso!\n")
+    print("Modelo Random Forest treinado com sucesso!\n")
     return clf, scaler
 
 # --- 4. Lógica para teste individual (MODIFICADA) ---
@@ -77,6 +91,7 @@ def teste_individual(clf, scaler):
             cnt = max(contornos, key=cv2.contourArea)
             # Chamada simplificada
             carac = extrair_caracteristicas(cnt, imagem_teste)
+            
             carac_scaled = scaler.transform([carac])
             pred_centavos = clf.predict(carac_scaled)[0]
             pred_reais = pred_centavos / 100.0
@@ -116,8 +131,9 @@ def teste_em_massa(clf, scaler):
             contornos = segmentar_moedas(imagem_teste)
             if contornos:
                 cnt = max(contornos, key=cv2.contourArea)
-                # Chamada simplificada
+                # Chamada atualizada
                 carac = extrair_caracteristicas(cnt, imagem_teste)
+
                 carac_scaled = scaler.transform([carac])
                 pred_centavos = clf.predict(carac_scaled)[0]
                 y_true.append(valor_real)
@@ -170,11 +186,14 @@ def visualizar_filtros():
             cnt = max(contornos, key=cv2.contourArea)
             cv2.drawContours(imagem_com_contorno, [cnt], -1, (0, 255, 0), 2)
             
-            # Chamada simplificada
+            # Chamada atualizada
             carac = extrair_caracteristicas(cnt, imagem_original)
-
             print("\n--- Atributos Extraídos da Moeda ---")
-            print(f"Cor Média (B, G, R): ({carac[0]:.2f}, {carac[1]:.2f}, {carac[2]:.2f})")
+            print(f"Área: {carac[0]:.2f} | Perímetro: {carac[1]:.2f} | Circularidade: {carac[2]:.4f}")
+            print(f"Cor Média Total (B, G, R): ({carac[3]:.2f}, {carac[4]:.2f}, {carac[5]:.2f})")
+            print(f"Cor Núcleo (B, G, R): ({carac[6]:.2f}, {carac[7]:.2f}, {carac[8]:.2f})")
+            print(f"Cor Anel (B, G, R): ({carac[9]:.2f}, {carac[10]:.2f}, {carac[11]:.2f})")
+            print(f"Diferença média Anel-Núcleo: {carac[12]:.2f}")
             print("------------------------------------")
 
         else:
@@ -199,16 +218,13 @@ def main():
     if clf is None:
         print("Falha no treinamento. Encerrando o programa.")
         return
-
     while True:
-        print("\nEscolha uma opção (main2.py - Versão Simplificada):")
+        print("\nEscolha uma opção (main2.py - Random Forest):")
         print("1 - Classificar uma única imagem da pasta 'teste'")
         print("2 - Realizar teste em massa com a pasta 'testesmassivos' e gerar relatório")
         print("3 - Visualizar etapas de pré-processamento da imagem de teste")
         print("4 - Sair")
-        
         choice = input("Digite sua escolha (1, 2, 3 ou 4): ")
-        
         if choice == '1':
             teste_individual(clf, scaler)
         elif choice == '2':
